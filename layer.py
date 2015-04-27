@@ -12,19 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from math import exp
 import sys
-import ConfigParser as cfg
 import os
-import numpy as n
-import numpy.random as nr
-from math import ceil, floor
+import re
+import warnings
+import ConfigParser as cfg
+from math import exp, ceil, floor
 from collections import OrderedDict
 from os import linesep as NL
+
+import numpy as n
+import numpy.random as nr
+
 from python_util.options import OptionsParser
-import re
+
 
 class LayerParsingError(Exception):
+    pass
+
+class WeightInitializationError(Exception):
     pass
 
 # A neuron that doesn't take parameters
@@ -303,45 +309,78 @@ class LayerParser:
                 NeuronLayerParser().detach_neuron_layer(name, layers)
                 
     @staticmethod
-    def parse_layers(layer_cfg_path, param_cfg_path, model, layers={}):
-        try:
-            if not os.path.exists(layer_cfg_path):
-                raise LayerParsingError("Layer definition file '%s' does not exist" % layer_cfg_path)
-            if not os.path.exists(param_cfg_path):
-                raise LayerParsingError("Layer parameter file '%s' does not exist" % param_cfg_path)
-            if len(layers) == 0:
-                mcp = MyConfigParser(dict_type=OrderedDict)
-                mcp.readfp(open(layer_cfg_path))
-                for name in mcp.sections():
-                    if not mcp.has_option(name, 'type'):
-                        raise LayerParsingError("Layer '%s': no type given" % name)
-                    ltype = mcp.safe_get(name, 'type')
-                    if ltype not in layer_parsers:
-                        raise LayerParsingError("Layer '%s': Unknown layer type: '%s'" % (name, ltype))
-                    layers[name] = layer_parsers[ltype]().parse(name, mcp, layers, model)
-                
-                LayerParser.detach_neuron_layers(layers)
-                for l in layers.values():
-                    l['parser'].optimize(layers)
-                    del l['parser']
-                    
-                for name,l in layers.items():
-                    if not l['type'].startswith('cost.'):
-                        found = max(name in l2['inputs'] for l2 in layers.values() if 'inputs' in l2)
-                        if not found:
-                            raise LayerParsingError("Layer '%s' of type '%s' is unused" % (name, l['type']))
-            
+    def parse_layers(layer_cfg_path, param_cfg_path, model, layers={},
+                     init_layers=None):
+#         try:
+        if not os.path.exists(layer_cfg_path):
+            raise LayerParsingError("Layer definition file '%s' does not exist" % layer_cfg_path)
+        if not os.path.exists(param_cfg_path):
+            raise LayerParsingError("Layer parameter file '%s' does not exist" % param_cfg_path)
+        if len(layers) == 0:
             mcp = MyConfigParser(dict_type=OrderedDict)
-            mcp.readfp(open(param_cfg_path))
-#            mcp.convnet = model
+            mcp.readfp(open(layer_cfg_path))
+            for name in mcp.sections():
+                if not mcp.has_option(name, 'type'):
+                    raise LayerParsingError("Layer '%s': no type given" % name)
+                ltype = mcp.safe_get(name, 'type')
+                if ltype not in layer_parsers:
+                    raise LayerParsingError("Layer '%s': Unknown layer type: '%s'" % (name, ltype))
+                layers[name] = layer_parsers[ltype]().parse(name, mcp, layers, model)
+            
+            LayerParser.detach_neuron_layers(layers)
+            for l in layers.values():
+                l['parser'].optimize(layers)
+                del l['parser']
+                
             for name,l in layers.items():
-                if not mcp.has_section(name) and l['requiresParams']:
-                    raise LayerParsingError("Layer '%s' of type '%s' requires extra parameters, but none given in file '%s'." % (name, l['type'], param_cfg_path))
-                lp = layer_parsers[l['type']]().init(l)
-                lp.add_params(mcp)
-        except LayerParsingError, e:
-            print e
-            sys.exit(1)
+                if not l['type'].startswith('cost.'):
+                    found = max(name in l2['inputs'] for l2 in layers.values() if 'inputs' in l2)
+                    if not found:
+                        warnings.warn("Layer '%s' of type '%s' is unused" % (name, l['type']))
+#                         raise LayerParsingError("Layer '%s' of type '%s' is unused" % (name, l['type']))
+                    
+        if init_layers: # init weights from existing files if needed
+            old_name2weights_dic = {}
+            for old_l in init_layers.values(): # make dictionary for fast query
+                if old_l.has_key('weights'):
+                    old_name2weights_dic[old_l['name']] = [old_l['weights']]
+                if old_l.has_key('biases'):
+                    try:
+                        old_name2weights_dic[old_l['name']] += [old_l['biases']]
+                    except:
+                        old_name2weights_dic[old_l['name']] = [old_l['biases']]
+            for l in layers.values(): # init weights of the new layer
+                lname = l['name']
+                if old_name2weights_dic.has_key(lname):
+                    old_weights = old_name2weights_dic[lname]
+                    if l.has_key('weights'):
+                        if len(l['weights']) == len(old_weights[0]):
+                            for (new_w, old_w) in zip(l['weights'], old_weights[0]):
+                                if new_w.shape != old_w.shape:
+                                    raise WeightInitializationError('WEIGHTS: sizes not equal')
+                            l['weights'] = old_weights[0]
+                            print 'weights of layer %s successfully loaded' % lname
+                        else:
+                            raise WeightInitializationError('WEIGHTS: sizes not equal')
+                    if l.has_key('biases'):
+                        if l['biases'].shape == old_weights[-1].shape:
+                            l['biases'] = old_weights[-1]
+                            print ' biases of layer %s successfully loaded' % lname
+                        else:
+                            raise WeightInitializationError('BIASES: sizes not equal')        
+
+        mcp = MyConfigParser(dict_type=OrderedDict)
+        mcp.readfp(open(param_cfg_path))
+#            mcp.convnet = model
+        for name,l in layers.items():
+            if not mcp.has_section(name) and l['requiresParams']:
+                raise LayerParsingError("Layer '%s' of type '%s' requires extra parameters, but none given in file '%s'." % (name, l['type'], param_cfg_path))
+            lp = layer_parsers[l['type']]().init(l)
+            lp.add_params(mcp)
+#         except LayerParsingError, e:
+#             print e
+# #             sys.exit(1)
+#             raise e
         return layers
         
     @staticmethod
@@ -936,10 +975,20 @@ class WeightLayerParser(LayerWithInputParser):
                 raise LayerParsingError("Layer '%s': bias vector returned by bias initialization function %s has wrong shape. Should be: %s; got: %s." % (dic['name'], dic['initBFunc'], (rows, cols), dic['biases'].shape))
 
             dic['biases'] = n.require(dic['biases'], requirements=order)
+            dic['biasesInc'] = n.zeros_like(dic['biases'])
             print "Layer '%s' initialized bias vector from function %s" % (dic['name'], dic['initBFunc'])
         else:
-            dic['biases'] = dic['initB'] * n.ones((rows, cols), order=order, dtype=n.single)
-        dic['biasesInc'] = n.zeros_like(dic['biases'])
+            if dic['weightSourceLayers'][0] != '': # Shared bias matrix
+                src_layer = self.prev_layers[dic['weightSourceLayers'][0]] if dic['weightSourceLayers'][0] != dic['name'] else dic
+                dic['biases'] = src_layer['biases']
+                dic['biasesInc'] = src_layer['biasesInc']
+                if dic['biases'].shape != (rows, cols):
+                    raise LayerParsingError("Layer '%s': bias sharing source matrix '%s' has shape %dx%d; should be %dx%d." 
+                                            % (dic['name'], dic['weightSource'][0], dic['biases'].shape[0], dic['biases'].shape[1], rows, cols))
+                print "Layer '%s' initialized bias matrix from %s" % (dic['name'], dic['weightSource'][0])
+            else:
+                dic['biases'] = dic['initB'] * n.ones((rows, cols), order=order, dtype=n.single)
+                dic['biasesInc'] = n.zeros_like(dic['biases'])
         
     def parse(self, name, mcp, prev_layers, model):
         dic = LayerWithInputParser.parse(self, name, mcp, prev_layers, model)
@@ -1254,9 +1303,6 @@ class PoolLayerParser(LayerWithInputParser):
         dic['imgPixels'] = dic['numInputs'][0] / dic['channels']
         dic['imgSize'] = int(n.sqrt(dic['imgPixels']))
         
-        if dic['pool'] == 'avg':
-            dic['sum'] = mcp.safe_get_bool(name, 'sum', default=False)
-        
         self.verify_num_range(dic['sizeX'], 'sizeX', 1, dic['imgSize'])
         self.verify_num_range(dic['stride'], 'stride', 1, dic['sizeX'])
         self.verify_num_range(dic['outputsX'], 'outputsX', 0, None)
@@ -1478,6 +1524,15 @@ class SumOfSquaresCostParser(CostParser):
         print "Initialized sum-of-squares cost '%s' on GPUs %s" % (name, dic['gpus'])
         return dic
     
+class LocRankCostParser(CostParser):
+    def __init__(self):
+        CostParser.__init__(self, num_inputs=4)
+        
+    def parse(self, name, mcp, prev_layers, model):
+        dic = CostParser.parse(self, name, mcp, prev_layers, model)
+        print "Initialized local rank cost '%s'" % name
+        return dic
+    
 # All the layer parsers
 layer_parsers = {'data' :           lambda : DataLayerParser(),
                  'fc':              lambda : FCLayerParser(),
@@ -1507,10 +1562,11 @@ layer_parsers = {'data' :           lambda : DataLayerParser(),
                  'dropout':         lambda : DropoutLayerParser(),
                  'dropout2':        lambda : Dropout2LayerParser(),
                  'cost.logreg':     lambda : LogregCostParser(),
-                 'cost.crossent':   lambda : CrossEntCostParser(),
+                 'cost.ce':         lambda : CrossEntCostParser(),
                  'cost.bce':        lambda : BinomialCrossEntCostParser(),
                  'cost.dce':        lambda : DetectionCrossEntCostParser(),
-                 'cost.sum2':       lambda : SumOfSquaresCostParser()}
+                 'cost.sum2':       lambda : SumOfSquaresCostParser(),
+                 'cost.locrank':    lambda : LocRankCostParser()}
  
 # All the neuron parsers
 # This isn't a name --> parser mapping as the layer parsers above because neurons don't have fixed names.
