@@ -61,11 +61,13 @@ class DataProvider:
             #print sub_batches
             num_sub_batches = len(sub_batches)
             tgts = [[] for i in xrange(num_sub_batches)]
-            threads = [DataLoaderThread(os.path.join(fname, s), tgt) for (s, tgt) in zip(sub_batches, tgts)]
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join()
+            #threads = [DataLoaderThread(os.path.join(fname, s), tgt) for (s, tgt) in zip(sub_batches, tgts)]
+            #for thread in threads:
+                #thread.start()
+            #for thread in threads:
+                #thread.join()
+            for i in xrange(num_sub_batches):
+                tgts[i] += [unpickle(os.path.join(fname, sub_batches[i]))]
             
             return [t[0] for t in tgts]
         return unpickle(self.get_data_file_name(batch_num))
@@ -89,7 +91,9 @@ class DataProvider:
     def get_data_file_name(self, batchnum=None):
         if batchnum is None:
             batchnum = self.curr_batchnum
-        return os.path.join(self.data_dir, 'data_batch_%d' % batchnum)
+        if 'batch-name-format' not in self.dp_params:
+            self.dp_params['batch-name-format'] = 'data_batch_%d'
+        return os.path.join(self.data_dir, self.dp_params['batch-name-format'] % batchnum)
     
     @classmethod
     def get_instance(cls, data_dir, batch_range=None, init_epoch=1, init_batchnum=None, type="default", dp_params={}, test=False):
