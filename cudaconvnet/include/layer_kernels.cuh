@@ -84,5 +84,9 @@ void computeLogregSoftmaxGrad(NVMatrix& labels, NVMatrix& probs, NVMatrix& targe
 void computeEltwiseMaxGrad(NVMatrix& actGrad, NVMatrix& input, NVMatrix& output, NVMatrix& target, bool add);
 void computeMultiSoftmaxCost(NVMatrix& labels, NVMatrix& probs, NVMatrix& maxProbs, NVMatrix& labelLogProbs_out,
                              NVMatrix& correctProbs_out, NVMatrix& top5Probs_out, int setSize);
+
+void computeLocRankCost(NVMatrix& x1, NVMatrix& x2, NVMatrix& x3, NVMatrix& x4, NVMatrix& rankCost_out);
+void computeLocRankGrad(NVMatrix& rankCost, NVMatrix& x1, NVMatrix& x2, NVMatrix& x3, NVMatrix& x4, NVMatrix& target1, NVMatrix& target2, NVMatrix& target3, float coeff);
+
 #endif	/* LAYER_KERNELS_CUH */
 

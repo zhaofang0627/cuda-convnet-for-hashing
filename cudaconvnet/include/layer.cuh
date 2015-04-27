@@ -118,6 +118,7 @@ protected:
     IActGradReducer* _gradReducer;
     Timer _timer;
     bool _initialized;
+    bool _isTerminal;
 
     virtual void fpropNext(PASS_TYPE passType, int passIdx);
     virtual void truncBwdActs(); 
@@ -219,6 +220,8 @@ public:
     int getActivePassPeriod();
     int getNumGradProducersNext();
     virtual ConvNet& getConvNet();
+    void setTerminal(){_isTerminal=true;};
+    bool isTerminal(){return _isTerminal;};
 };
 
 class TwoDLayerInterface {
@@ -280,6 +283,7 @@ public:
     virtual void copyToGPU();
     virtual void checkGradient();
     Weights& getWeights(int idx);
+    Weights& getBiases();
     void addReplica(Layer& l);
     virtual bool postInit();
 };
@@ -520,7 +524,6 @@ public:
 
 class AvgPoolLayer : public PoolLayer {
 protected:
-    bool _sum;
     void fpropActs(int inpIdx, float scaleTargets, PASS_TYPE passType, int passIdx);
     void bpropActs(NVMatrix& v, int replicaIdx, int inpIdx, float scaleTargets, PASS_TYPE passType);
 public:
@@ -714,7 +717,7 @@ protected:
 public:
     CostLayer(ConvNetThread* convNetThread, PyObject* paramsDict, int replicaID, bool trans);
     void bprop(NVMatrix& v, PASS_TYPE passType, int passIdx);
-    bool fprop(PASS_TYPE passType, int passIdx);
+//    bool fprop(PASS_TYPE passType, int passIdx);
     
     int getNumCases();
     virtual doublev& getCost();
@@ -732,7 +735,6 @@ public:
  */
 class CrossEntCostLayer : public CostLayer {
 protected:
-    NVMatrix _trueLabelLogProbs, _correctProbs;
     void fpropActs(int inpIdx, float scaleTargets, PASS_TYPE passType, int passIdx);
     void bpropActs(NVMatrix& v, int replicaIdx, int inpIdx, float scaleTargets, PASS_TYPE passType);
 public:
@@ -806,6 +808,16 @@ protected:
     void bpropActs(NVMatrix& v, int replicaIdx, int inpIdx, float scaleTargets, PASS_TYPE passType);
 public:
     SumOfSquaresCostLayer(ConvNetThread* convNetThread, PyObject* paramsDict, int replicaID);
+};
+
+/* Local rank cost layer */
+class LocRankCostLayer : public CostLayer {
+protected:
+	NVMatrix _rankCosts;
+    void fpropActs(int inpIdx, float scaleTargets, PASS_TYPE passType, int passIdx);
+    void bpropActs(NVMatrix& v, int replicaIdx, int inpIdx, float scaleTargets, PASS_TYPE passType);
+public:
+    LocRankCostLayer(ConvNetThread* convNetThread, PyObject* paramsDict, int replicaID);
 };
 
 #endif    /* LAYER_CUH */
