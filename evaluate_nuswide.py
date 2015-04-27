@@ -33,7 +33,7 @@ if __name__ == "__main__":
     batch_size = 512
     num_bits = 64
     k = 100
-    feat_path = "/home/zhaofang/cuda-workspace/retr-model/nuswide/metric/64bits/hash-nuswide-48bits"
+    feat_path = "/home/zhaofang/cuda-workspace/retr-model/nuswide/metric/64bits/hash-nuswide-64bits"
     data_path = "/home/zhaofang/dataset/NUS_WIDE/batchdata"
     meta = unpickle(os.path.join(data_path, 'batches.meta'))
     label_names = n.array(meta['label_names'])
