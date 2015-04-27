@@ -66,6 +66,9 @@ class IGPUModel:
         
         for o in op.get_options_list():
             setattr(self, o.name, o.value)
+        if not self.test_dp_type:
+            self.test_dp_type = self.dp_type
+            
         self.loaded_from_checkpoint = load_dic is not None
         # these are things that the model must remember but they're not input parameters
         if self.loaded_from_checkpoint:
@@ -84,7 +87,7 @@ class IGPUModel:
 #            print self.save_file
 
         self.init_data_providers()
-        if load_dic: 
+        if load_dic:
             self.train_data_provider.advance_batch()
             
         # model state often requries knowledge of data provider, so it's initialized after
@@ -111,7 +114,7 @@ class IGPUModel:
         self.dp_params['convnet'] = self
         try:
             self.test_data_provider = DataProvider.get_instance(self.data_path, self.test_batch_range,
-                                                                type=self.dp_type, dp_params=self.dp_params, test=True)
+                                                                type=self.test_dp_type, dp_params=self.dp_params, test=True)
             self.train_data_provider = DataProvider.get_instance(self.data_path, self.train_batch_range,
                                                                      self.model_state["epoch"], self.model_state["batchnum"],
                                                                      type=self.dp_type, dp_params=self.dp_params, test=False)
@@ -136,7 +139,7 @@ class IGPUModel:
         if self.force_save:
             self.save_state().join()
         sys.exit(0)
-    
+    @profile
     def train(self):
         print "========================="
         print "Training %s" % self.model_name
@@ -148,18 +151,22 @@ class IGPUModel:
         print "Saving checkpoints to %s" % self.save_file
         print "========================="
         next_data = self.get_next_batch()
+            
         while self.epoch <= self.num_epochs:
             data = next_data
             self.epoch, self.batchnum = data[0], data[1]
             self.print_iteration()
             sys.stdout.flush()
             
+            if self.op.get_value('model_tags'):
+                tagmodel.init_weights()
+            
             compute_time_py = time()
             self.start_batch(data)
             
             # load the next batch while the current one is computing
             next_data = self.get_next_batch()
-            
+
             batch_output = self.finish_batch()
             self.train_outputs += [batch_output]
             self.print_train_results()
@@ -241,18 +248,17 @@ class IGPUModel:
     def get_test_error(self):
         next_data = self.get_next_batch(train=False)
         test_outputs = []
+        first_batchnum = next_data[1]
         while True:
             data = next_data
             start_time_test = time()
             self.start_batch(data, train=False)
-            load_next = (not self.test_one or self.test_only) and data[1] < self.test_batch_range[-1]
-            if load_next: # load next batch
-                next_data = self.get_next_batch(train=False)
+            next_data = self.get_next_batch(train=False)
             test_outputs += [self.finish_batch()]
             if self.test_only: # Print the individual batch results for safety
                 print "batch %d: %s" % (data[1], str(test_outputs[-1])),
                 self.print_elapsed_time(time() - start_time_test)
-            if not load_next:
+            if self.test_one or next_data[1] == first_batchnum:
                 break
             sys.stdout.flush()
             
@@ -309,6 +315,7 @@ class IGPUModel:
         op.add_option("train-range", "train_batch_range", RangeOptionParser, "Data batch range: training")
         op.add_option("test-range", "test_batch_range", RangeOptionParser, "Data batch range: testing")
         op.add_option("data-provider", "dp_type", StringOptionParser, "Data provider", default="default")
+        op.add_option("test-data-provider", "test_dp_type", StringOptionParser, "Data provider for testing", default="")
         op.add_option("test-freq", "testing_freq", IntegerOptionParser, "Testing frequency", default=25)
         op.add_option("epochs", "num_epochs", IntegerOptionParser, "Number of epochs", default=500)
         op.add_option("data-path", "data_path", StringOptionParser, "Data path")
@@ -318,6 +325,8 @@ class IGPUModel:
         op.add_option("test-one", "test_one", BooleanOptionParser, "Test on one batch at a time?", default=1)
         op.add_option("force-save", "force_save", BooleanOptionParser, "Force save before quitting", default=0)
         op.add_option("gpu", "gpu", ListOptionParser(IntegerOptionParser), "GPU override")
+        
+        op.add_option("model-tags", "model_tags", BooleanOptionParser, "Model tags with RBM?", default=0)
         return op
 
     @staticmethod

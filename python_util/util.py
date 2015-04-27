@@ -15,7 +15,24 @@
 import re
 import cPickle
 import os
+import __builtin__
 from cStringIO import StringIO
+
+# check line_profiler
+try:
+    profile = __builtin__.profile
+except AttributeError:
+    # No line profiler, provide a pass-through version
+    def profile(func): return func
+
+try:
+    import magic
+    import gzip
+    import zipfile
+    ms = magic.open(magic.MAGIC_NONE)
+    ms.load()
+except ImportError: # no magic module
+    ms = None
 
 class UnpickleError(Exception):
     pass
@@ -23,12 +40,15 @@ class UnpickleError(Exception):
 GPU_LOCK_NO_SCRIPT = -2
 GPU_LOCK_NO_LOCK = -1
 
-def pickle(filename, data):
+def pickle(filename, data, compress=False):
     fo = filename
-    if type(filename) == str:
-        fo = open(filename, "w")
-    
-    cPickle.dump(data, fo, protocol=cPickle.HIGHEST_PROTOCOL)
+    if compress:
+        fo = zipfile.ZipFile(filename, 'w', zipfile.ZIP_DEFLATED, allowZip64=True)
+        fo.writestr('data', cPickle.dumps(data, -1))
+    else:
+        if type(filename) == str:
+            fo = open(filename, "w")
+        cPickle.dump(data, fo, protocol=cPickle.HIGHEST_PROTOCOL)
     fo.close()
     
 def unpickle(filename):
