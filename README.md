@@ -10,3 +10,5 @@ This algorithm is described in [Deep Semantic Ranking Based Hashing for Multi-La
 - [retrdata.py](https://github.com/zhaofang0627/cuda-convnet-for-hashing/blob/master/retrdata.py) implements data providers for training and test
 
 - [evaluate_nuswide.py](https://github.com/zhaofang0627/cuda-convnet-for-hashing/blob/master/evaluate_nuswide.py) computes ndcg, acg and weighted mAP for evaluation
+
+Please find the original cuda-convnet code / wiki from this link: https://code.google.com/p/cuda-convnet2/
