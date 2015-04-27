@@ -171,7 +171,7 @@ IBroadcastNetwork& IBroadcastNetwork::make(set<int> devices, int srcDevice) {
 }
 
 IBroadcastNetwork::IBroadcastNetwork(set<int>& devices, int srcDeviceID, int numTerminal)
-    : _devices(devices), _srcDeviceID(srcDeviceID), _numTerminal(numTerminal), _constructed(false), _src(NULL) {
+    : _devices(devices), _srcDeviceID(srcDeviceID), _numTerminal(numTerminal), _constructed(false) {
 }
 
 IBroadcastNetwork::~IBroadcastNetwork() {
