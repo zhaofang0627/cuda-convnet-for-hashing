@@ -26,6 +26,10 @@ from convdata import ImageDataProvider, CIFARDataProvider, DummyConvNetLogRegDat
 from os import linesep as NL
 import copy as cp
 import os
+import json
+import scipy.io as sio
+
+from retrdata import NUSWideDataProvider, NUSWideTestDataProvider
 
 class Driver(object):
     def __init__(self, convnet):
@@ -73,14 +77,21 @@ class MultiviewTestDriver(TrainingDriver):
 class FeatureWriterDriver(Driver):
     def __init__(self, convnet):
         Driver.__init__(self, convnet)
-        self.last_batch = convnet.test_batch_range[-1]
+        self.start_batch = None
+        self.appendix =  None
         
     def on_start_batch(self, batch_data, train):
         if train:
             raise ModelStateException("FeatureWriter must be used in conjunction with --test-only=1. It writes test data features.")
         
         self.batchnum, self.data = batch_data[1], batch_data[2]
-        
+        if len(batch_data)>3:
+            self.appendix = batch_data[3:]
+        if self.start_batch is None:
+            self.start_batch = self.batchnum 
+        elif self.start_batch == self.batchnum:
+            pickle(os.path.join(self.convnet.feature_path, 'batches.meta'), {'source_model':self.convnet.load_file,
+                                                                             'num_vis':self.num_ftrs})
         if not os.path.exists(self.convnet.feature_path):
             os.makedirs(self.convnet.feature_path)
         
@@ -90,20 +101,40 @@ class FeatureWriterDriver(Driver):
     
     def on_finish_batch(self):
         path_out = os.path.join(self.convnet.feature_path, 'data_batch_%d' % self.batchnum)
-        pickle(path_out, {'data': self.ftrs, 'labels': self.data[1]})
+        pickle(path_out, {'data': self.ftrs, 'labels': self.data[4].T ,'appendix':self.appendix})
+        #sio.savemat(path_out, {'data': self.ftrs, 'labels': self.data[4].T})
         print "Wrote feature file %s" % path_out
-        if self.batchnum == self.last_batch:
-            pickle(os.path.join(self.convnet.feature_path, 'batches.meta'), {'source_model':self.convnet.load_file,
-                                                                             'num_vis':self.num_ftrs,
-                                                                             'batch_size': self.convnet.test_data_provider.batch_meta['batch_size']})
-
+            
 class ConvNet(IGPUModel):
     def __init__(self, op, load_dic, dp_params={}):
         filename_options = []
-        for v in ('color_noise', 'multiview_test', 'inner_size', 'scalar_mean', 'minibatch_size'):
+        for v in ('color_noise', 'multiview_test', 'inner_size', 'scalar_mean', 'minibatch_size', 'write_features'):
             dp_params[v] = op.get_value(v)
-
+        
+        # load dp parameters from options in json format
+        dp_params_json = op.get_value('dp_params_json')
+        dp_params_dict = json.loads(dp_params_json)
+        if isinstance(dp_params_dict, dict):
+            dp_params.update(dp_params_dict)
+        
+        self.load_weight = None
+        # load pretrained weights
+        try:
+            wpath = op.get_value('weight_path')
+            if wpath != "" and not load_dic:
+                ms = self.load_checkpoint(wpath)
+                self.load_weight = ms['model_state']['layers']
+        except KeyError:
+            pass
+        
         IGPUModel.__init__(self, "ConvNet", op, load_dic, filename_options, dp_params=dp_params)
+        
+        # load data for sampling
+        self.data_list = unpickle(os.path.join(self.data_path, 'datalist'))
+        self.label_mat = unpickle(os.path.join(self.data_path, 'labmat')).astype(n.single)
+        print self.label_mat.shape
+        # balance
+        self.cls_weight = 3000/self.label_mat[:self.train_data_provider.train_size].sum(axis=0).astype(int)+1
         
     def import_model(self):
         lib_name = "cudaconvnet._ConvNet"
@@ -119,9 +150,18 @@ class ConvNet(IGPUModel):
         
     def init_model_state(self):
         ms = self.model_state
-        layers = ms['layers'] if self.loaded_from_checkpoint else {}
+        if self.loaded_from_checkpoint:
+            layers = ms['layers']
+            init_layer = None
+        elif self.load_weight:
+            layers = {}
+            init_layer = self.load_weight
+        else:
+            layers = {}
+            init_layer = None
         ms['layers'] = lay.LayerParser.parse_layers(os.path.join(self.layer_path, self.layer_def),
-                                                    os.path.join(self.layer_path, self.layer_params), self, layers=layers)
+                                                    os.path.join(self.layer_path, self.layer_params), 
+                                                    self, layers=layers, init_layers=init_layer)
         
         self.do_decouple_conv()
         self.do_unshare_weights()
@@ -268,6 +308,12 @@ class ConvNet(IGPUModel):
         op.add_option("write-features", "write_features", StringOptionParser, "Write test data features from given layer", default="", requires=['feature-path'])
         op.add_option("feature-path", "feature_path", StringOptionParser, "Write test data features to this path (to be used with --write-features)", default="")
 
+        # extra options
+        op.add_option("dp-params", "dp_params_json", StringOptionParser, 
+                      "DP Parameters in JSON string", default="{}")
+        op.add_option("load-weight", "weight_path", StringOptionParser, 
+                      "Init from pretrained model", default="")
+        
         op.delete_option('max_test_err')
         op.options["testing_freq"].default = 57
         op.options["num_epochs"].default = 50000
@@ -276,6 +322,8 @@ class ConvNet(IGPUModel):
         DataProvider.register_data_provider('dummy-lr-n', 'Dummy ConvNet logistic regression', DummyConvNetLogRegDataProvider)
         DataProvider.register_data_provider('image', 'JPEG-encoded image data provider', ImageDataProvider)
         DataProvider.register_data_provider('cifar', 'CIFAR-10 data provider', CIFARDataProvider)
+        DataProvider.register_data_provider('nus-wide', 'NUS-Wide image data provider for retrieval', NUSWideDataProvider)
+        DataProvider.register_data_provider('nus-wide-test', 'NUS-Wide test image data provider for retrieval', NUSWideTestDataProvider)
   
         return op
 
