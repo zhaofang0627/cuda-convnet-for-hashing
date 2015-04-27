@@ -41,6 +41,7 @@ class DecoderThread : public Thread {
     int _start_img, _end_img;
     int _target_size;
     bool _crop_to_square;
+    bool _warp_to_square;
 
     cv::Mat _resized_mat_buffer;
     std::vector<uchar> _output_jpeg_buffer;
@@ -50,7 +51,7 @@ class DecoderThread : public Thread {
     void makeJPEG(int idx);
 
  public:
-    DecoderThread(PyObject* py_list_src, int start_img, int end_img, int target_size, bool crop_to_square);
+    DecoderThread(PyObject* py_list_src, int start_img, int end_img, int target_size, bool crop_to_square, bool warp_to_square);
     virtual ~DecoderThread();
     PyObject* getTargetList();
 };
