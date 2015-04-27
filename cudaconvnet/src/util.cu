@@ -194,13 +194,11 @@ std::vector<int>& getDeviceCPUs(int deviceID) {
             std::string cpuString;
             while (getline(f, cpuString, ',')) {
                 int start, end;
-                int found = sscanf(cpuString.c_str(), "%d-%d", &start, &end);
-                end = found == 1 ? start : end;
-                if (found > 0) {
+                if (sscanf(cpuString.c_str(), "%d-%d", &start, &end)) {
                     for (int i = start; i <= end; ++i) {
                         deviceCPUs[deviceID].push_back(i);
                     }
-                } 
+                }
             }
             f.close();
         } else {
