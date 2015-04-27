@@ -339,6 +339,62 @@ __global__ void kEltwiseMaxGrad(float* actGrad, float* input, float* output, flo
     }
 }
 
+/*
+ * E = hinge_loss(disH(x1,x3) - disH(x1,x2))
+ * x1:          (numCases, numHids)
+ * x2:          (numCases, numHids)
+ * x3:          (numCases, numHids)
+ * rankCost:    (numCases, 1)   (*out)
+ */
+__global__ void kLocRankCost(float* x1, float* x2, float* x3, float* x4, float* rankCost, const int numCases, const int numHids) {
+    const int tx = blockIdx.x * LOGREG_ERR_THREADS_X + threadIdx.x;
+    float tempCost = 0;
+    float margin = 5.0;
+
+    if (tx < numCases) {
+    	rankCost[tx] = 0;
+    	for (int j = 0; j < numHids; j++) {
+    		tempCost += 0.5 * ((2 * x1[j * numCases + tx] - 1) * (2 * x3[j * numCases + tx] - 1)- (2 * x1[j * numCases + tx] - 1) * (2 * x2[j * numCases + tx] - 1));
+    	}
+
+    	tempCost = tempCost + margin;
+
+    	if (tempCost > 0) {
+    		rankCost[tx] = x4[tx] * tempCost;
+    	}
+    }
+}
+
+/*
+ * E = hinge_loss(disH(x1,x3) - disH(x1,x2)) + penalty_balance
+ * x1, x2, x3:                (numCases, numHids)
+ * dE_dx_1, dE_dx_2, dE_dx_3: (numCases, numHids)
+ * rankCost:                  (numCases, 1)
+ */
+__global__ void kLocRankGrad(float* rankCost, float* x1, float* x2, float* x3, float* x4, float* dE_dx_1, float* dE_dx_2, float* dE_dx_3, const int numCases, const int numHids, const float gradCoeff) {
+    const int tx = blockIdx.x * LOGREG_GRAD_THREADS_X + threadIdx.x;
+    const int ty = blockIdx.y * LOGREG_GRAD_THREADS_Y + threadIdx.y;
+    const int tidx = ty * numCases + tx;
+    const float rho = 1.0;
+    float mean_x1 = 0;
+
+    if (ty < numHids && tx < numCases) {
+    	dE_dx_1[tidx] = 0;
+    	dE_dx_2[tidx] = 0;
+    	dE_dx_3[tidx] = 0;
+    	for (int i = 0; i < numCases; i++) {
+    		mean_x1 += (2 * x1[ty * numCases + i] - 1);
+		}
+    	mean_x1 /= float(numCases);
+    	if (rankCost[tx] > 0) {
+			dE_dx_1[tidx] = x4[tx] * 2 * gradCoeff * (x2[tidx] - x3[tidx]);
+			dE_dx_2[tidx] = x4[tx] * gradCoeff * (2 * x1[tidx] - 1);
+			dE_dx_3[tidx] = x4[tx] * (-1) * gradCoeff * (2 * x1[tidx] - 1);
+    	}
+    	dE_dx_1[tidx] = dE_dx_1[tidx] - x4[tx] * rho * 2 * mean_x1 / float(numCases);
+    }
+}
+
 void computeEltwiseMaxGrad(NVMatrix& actGrad, NVMatrix& input, NVMatrix& output, NVMatrix& target, bool add) {
     assert(actGrad.isContiguous());
     assert(output.isContiguous());
@@ -552,4 +608,53 @@ void computeLogregSoftmaxGrad(NVMatrix& labels, NVMatrix& probs, NVMatrix& targe
     }
 
     getLastCudaError("computeLogregSoftmaxGrad: Kernel execution failed");
+}
+
+void computeLocRankCost(NVMatrix& x1, NVMatrix& x2, NVMatrix& x3, NVMatrix& x4, NVMatrix& rankCost_out) {
+    int numCases = x1.getLeadingDim();
+    int numHids = x1.getFollowingDim();
+
+    assert(x2.getNumRows() == numCases);
+    assert(x3.getNumRows() == numCases);
+    assert(x4.getNumRows() == numCases);
+    assert(x1.isTrans());
+    assert(x4.isTrans());
+
+    rankCost_out.resize(numCases, 1);
+    dim3 threads(LOGREG_ERR_THREADS_X, 1);
+    dim3 blocks(DIVUP(numCases, LOGREG_ERR_THREADS_X), 1);
+	cudaFuncSetCacheConfig(kLocRankCost, cudaFuncCachePreferL1);
+	cudaStream_t stream = NVMatrix::getDefaultStream();
+	kLocRankCost<<<blocks, threads, 0, stream>>>(x1.getDevData(), x2.getDevData(), x3.getDevData(), x4.getDevData(), rankCost_out.getDevData(), numCases, numHids);
+	getLastCudaError("computeLocRankCost: Kernel execution failed");
+//    cudaThreadSynchronize();
+}
+
+void computeLocRankGrad(NVMatrix& rankCost, NVMatrix& x1, NVMatrix& x2, NVMatrix& x3, NVMatrix& x4, NVMatrix& target1, NVMatrix& target2, NVMatrix& target3, float coeff) {
+	int numCases = x1.getLeadingDim();
+	int numHids = x1.getFollowingDim();
+
+	assert(x2.getNumRows() == numCases);
+	assert(x3.getNumRows() == numCases);
+	assert(x4.getNumRows() == numCases);
+	assert(x1.isTrans());
+	assert(x4.isTrans());
+	assert(x1.isContiguous());
+	assert(x2.isContiguous());
+	assert(x3.isContiguous());
+	assert(x4.isContiguous());
+	assert(target1.isContiguous());
+	assert(target2.isContiguous());
+	assert(target3.isContiguous());
+
+	target1.resize(numCases, numHids);
+	target2.resize(numCases, numHids);
+	target3.resize(numCases, numHids);
+
+	dim3 threads(LOGREG_GRAD_THREADS_X, LOGREG_GRAD_THREADS_Y);
+	dim3 blocks(DIVUP(numCases, LOGREG_GRAD_THREADS_X), DIVUP(numHids, LOGREG_GRAD_THREADS_Y));
+	cudaStream_t stream = NVMatrix::getDefaultStream();
+	kLocRankGrad<<<blocks, threads, 0, stream>>>(rankCost.getDevData(), x1.getDevData(), x2.getDevData(), x3.getDevData(), x4.getDevData(), target1.getDevData(), target2.getDevData(), target3.getDevData(), numCases, numHids, coeff);
+
+	getLastCudaError("computeLocRankGrad: Kernel execution failed");
 }

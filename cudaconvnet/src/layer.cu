@@ -27,7 +27,7 @@
 
 using namespace std;
 
-/*
+/* 
  * =======================
  * Layer
  * =======================
@@ -36,7 +36,7 @@ Layer::Layer(ConvNetThread* convNetThread, PyObject* paramsDict, int replicaID, 
              _convNetThread(convNetThread),  _replicaID(replicaID), _trans(trans) {
     _name = pyDictGetString(paramsDict, "name");
     _type = pyDictGetString(paramsDict, "type");
-   
+    
     _foundGradConsumers = false;
     _gradConsumer = pyDictGetInt(paramsDict, "gradConsumer");
     _actsTarget = pyDictGetInt(paramsDict, "actsTarget");
@@ -49,6 +49,7 @@ Layer::Layer(ConvNetThread* convNetThread, PyObject* paramsDict, int replicaID, 
     _actBroadcaster = NULL;
     _gradReducer = NULL;
     _initialized = false;
+    _isTerminal = false;
 }
 
 Layer::~Layer() {
@@ -107,6 +108,7 @@ bool Layer::fprop(PASS_TYPE passType, int passIdx) {
     // I require messages from *all* input replicas because it makes the propagation easier to think about.
     // Without this requirement, when all fprop terminal msgs arrive to ConvNet, the forward propagation
     // might not actually be finished yet.
+    bool result = false;
     if (_rcvdFInputMsgs == getNumExpectedFwdMsgs()) {
 //        printf("Layer %s[%d] fprop\n", _name.c_str(), getReplicaID());
         int ridx = getFwdActiveInputReplicaIdx(passIdx);
@@ -118,9 +120,15 @@ bool Layer::fprop(PASS_TYPE passType, int passIdx) {
             }
         }
         fprop(v, passType, passIdx);
-        return true;
+        result = true;
+    }else
+    	result =  false;
+
+    if (result && _isTerminal) {
+        syncStream();
+        getConvNet().getMessageQueue().enqueue(new Message(FPROP_TERMINAL));
     }
-    return false;
+    return result;
 }
 
 void Layer::fprop(map<int,NVMatrix*>& v, PASS_TYPE passType, int passIdx) {
@@ -141,7 +149,7 @@ void Layer::fprop(map<int,NVMatrix*>& v, PASS_TYPE passType, int passIdx) {
                 it->second->transpose(_trans);
             }
             getActs().transpose(_trans);
-   
+    
             fpropCommon(passType);
 
             // First do fprop on the input whose acts matrix I'm sharing, if any
@@ -187,14 +195,13 @@ int Layer::getNumExpectedFwdMsgs() {
 
 void Layer::bprop(PASS_TYPE passType, int passIdx) {
     if (getBwdActiveInputReplicaIdx(passIdx) >= 0 && _rcvdBInputMsgs == getNumExpectedBwdMsgs()) {
-//        printf("Layer %s[%d] bprop\n", _name.c_str(), getReplicaID());
         if (_gradReducer != NULL) {
             _gradReducer->waitForFinish();
         }
 
         // This does sync, but only if it has grad consumers below! so we must sync again before sending bprop terminal messages
         bprop(getActsGrad(), passType, passIdx);
-       
+        
         if (_bwdTerminal[passIdx]) {
             syncStream();
             getConvNet().getMessageQueue().enqueue(new Message(BPROP_TERMINAL));
@@ -211,7 +218,7 @@ void Layer::bpropActsCall(NVMatrix& v, PASS_TYPE passType, int replicaIdx, int i
         prev.getNumComputedActsGrads(getDeviceID())++;
         // Synchronize if the previous layer is going to actually do a reduction.
         // If the previous layer is on the same GPU as us and has no next layers
-        // on other GPUs then it won't need to do a reduction.
+        // on other GPUs then it won't need to do a reduction. 
         if (prev.getNextDeviceIDs().size() > 1 || (prev.getNextDeviceIDs().size() == 1 && getDeviceID() != prev.getDeviceID())) {
             syncStream();
         }
@@ -459,7 +466,7 @@ bool Layer::isGradConsumer() {
 
 // Does this layer produce gradient for layers below?
 bool Layer::isGradProducer() {
-    return true;
+    return (true && not _isTerminal);
 }
 
 bool Layer::isGradProducer(std::string& layerName) {
@@ -621,7 +628,7 @@ int Layer::getInputIdx(std::string& parentName) {
     return _inputIndices[parentName];
 }
 
-/*
+/* 
  * =======================
  * NeuronLayer
  * =======================
@@ -684,15 +691,15 @@ std::string& NeuronLayer::getNeuronType() {
     return _neuronType;
 }
 
-/*
+/* 
  * =======================
  * WeightLayer
  * =======================
- *
+ * 
  * The useGrad parameter here merely expresses a preference by the subclass. It may
  * be overridden by the superclass (WeightLayer) and in that case the subclass must follow its wishes.
  * So when computing gradient updates, the subclass must always first check weights.isUseGrad().
- *
+ * 
  * Note: biases always useGrad.
  */
 WeightLayer::WeightLayer(ConvNetThread* convNetThread, PyObject* paramsDict, int replicaID, bool trans, bool useGrad) :
@@ -732,15 +739,18 @@ WeightLayer::WeightLayer(ConvNetThread* convNetThread, PyObject* paramsDict, int
         ParameterSchedule& lrs = ParameterSchedule::make(pyEpsW); // Learning rate schedule
         if (srcLayerName == _name) { // Current layer
             _weights->addWeights(*new Weights(_weights->at(matrixIdx), lrs, *this));
+            _biases = new Weights(hBiases, hBiasesInc, ParameterSchedule::make(pyEpsB), *this, 0, 0, momB, true);
         } else if (srcLayerName != "") {
             WeightLayer& srcLayer = *static_cast<WeightLayer*>(&convNetThread->getLayer(srcLayerName));
             Weights* srcWeights = &srcLayer.getWeights(matrixIdx);
             _weights->addWeights(*new Weights(*srcWeights, lrs, *this));
+            Weights* srcBiases = &srcLayer.getBiases();
+            _biases = new Weights(*srcBiases, ParameterSchedule::make(pyEpsB), *this);
         } else {
             _weights->addWeights(*new Weights(*hWeights[i], *hWeightsInc[i], lrs, *this, wc[i], wball[i], momW[i], useGrad));
+            _biases = new Weights(hBiases, hBiasesInc, ParameterSchedule::make(pyEpsB), *this, 0, 0, momB, true);
         }
     }
-    _biases = new Weights(hBiases, hBiasesInc, ParameterSchedule::make(pyEpsB), *this, 0, 0, momB, true);
 
     delete &weightSourceLayers;
     delete &weightSourceMatrixIndices;
@@ -845,6 +855,10 @@ Weights& WeightLayer::getWeights(int idx) {
     return _weights->at(idx);
 }
 
+Weights& WeightLayer::getBiases() {
+    return *_biases;
+}
+
 float WeightLayer::getGradScale(int inpIdx, PASS_TYPE passType) {
     // weight update period must be multiple of activation period
     // TODO: simply accumulate # of cases seen between weight updates. simpler and more accurate.
@@ -884,7 +898,7 @@ NVMatrix& WeightLayer::getBiasMatrix(PASS_TYPE passType) {
     return _biases->getW();
 }
 
-/*
+/* 
  * =======================
  * FCLayer
  * =======================
@@ -999,7 +1013,7 @@ TwoDLayerInterface::TwoDLayerInterface(PyObject* paramsDict) {
     _imgPixels = _imgSize * _imgSize;
 }
 
-/*
+/* 
  * =======================
  * LocalLayer
  * =======================
@@ -1016,7 +1030,7 @@ LocalLayer::LocalLayer(ConvNetThread* convNetThread, PyObject* paramsDict, int r
     _filterChannels = pyDictGetIntV(paramsDict, "filterChannels");
     _filterPixels = pyDictGetIntV(paramsDict, "filterPixels");
     _imgPixels = pyDictGetIntV(paramsDict, "imgPixels");
-   
+    
     _modulesX = pyDictGetInt(paramsDict, "modulesX");
     _modules = pyDictGetInt(paramsDict, "modules");
 }
@@ -1033,7 +1047,7 @@ LocalLayer::~LocalLayer() {
     delete _imgPixels;
 }
 
-/*
+/* 
  * =======================
  * ConvLayer
  * =======================
@@ -1135,7 +1149,7 @@ void ConvLayer::_constrainWeights() {
     }
 }
 
-/*
+/* 
  * =======================
  * LocalUnsharedLayer
  * =======================
@@ -1176,7 +1190,7 @@ void LocalUnsharedLayer::_constrainWeights() {
     }
 }
 
-/*
+/* 
  * =======================
  * SoftmaxLayer
  * =======================
@@ -1218,7 +1232,7 @@ void SoftmaxLayer::setDoUpperGrad(bool b) {
     _doUpperGrad = b;
 }
 
-/*
+/* 
  * =======================
  * ConcatenationLayer
  * =======================
@@ -1244,7 +1258,7 @@ void ConcatenationLayer::bpropActs(NVMatrix& v, int replicaIdx, int inpIdx, floa
     delete &copySrc;
 }
 
-/*
+/* 
  * =======================
  * PassThroughLayer
  * =======================
@@ -1276,7 +1290,7 @@ bool PassThroughLayer::postInit() {
 }
 
 
-/*
+/* 
  * =======================
  * EltwiseSumLayer
  * =======================
@@ -1297,7 +1311,7 @@ void EltwiseSumLayer::bpropActs(NVMatrix& v, int replicaIdx, int inpIdx, float s
     _prev[replicaIdx][inpIdx]->getActsGrad().add(v, scaleTargets, _coeffs->at(inpIdx));
 }
 
-/*
+/* 
  * =======================
  * EltwiseMaxLayer
  * =======================
@@ -1467,7 +1481,7 @@ int DataLayer::getNumInputReplicas() {
 }
 
 void DataLayer::fpropActs(int inpIdx, float scaleTargets, PASS_TYPE passType, int passIdx) {
-   
+    
 }
 
 NVMatrix& DataLayer::getActs(int deviceID) {
@@ -1615,7 +1629,7 @@ void* DataCopyThread::run() {
     return NULL;
 }
 
-/*
+/* 
  * =====================
  * PoolLayer
  * =====================
@@ -1641,28 +1655,23 @@ PoolLayer& PoolLayer::make(ConvNetThread* convNetThread, PyObject* paramsDict, i
     throw std::string("Unknown pooling layer type ") + _pool;
 }
 
-/*
+/* 
  * =====================
  * AvgPoolLayer
  * =====================
  */
 AvgPoolLayer::AvgPoolLayer(ConvNetThread* convNetThread, PyObject* paramsDict, int replicaID) : PoolLayer(convNetThread, paramsDict, replicaID, false) {
-    _sum = pyDictGetInt(paramsDict, "sum");
 }
 
 void AvgPoolLayer::fpropActs(int inpIdx, float scaleTargets, PASS_TYPE passType, int passIdx) {
-    if (_sum) {
-        convLocalPool(*_inputs[0], getActs(), _channels, _sizeX, _start, _stride, _outputsX, AvgPooler<true>());
-    } else {
-        convLocalPool(*_inputs[0], getActs(), _channels, _sizeX, _start, _stride, _outputsX, AvgPooler<false>());
-    }
+    convLocalPool(*_inputs[0], getActs(), _channels, _sizeX, _start, _stride, _outputsX, AvgPooler());
 }
 
 void AvgPoolLayer::bpropActs(NVMatrix& v, int replicaIdx, int inpIdx, float scaleTargets, PASS_TYPE passType) {
-    convLocalAvgUndo(v, _prev[replicaIdx][0]->getActsGrad(), _sizeX, _start, _stride, _outputsX, _imgSize, _sum, scaleTargets, 1);
+    convLocalAvgUndo(v, _prev[replicaIdx][0]->getActsGrad(), _sizeX, _start, _stride, _outputsX, _imgSize, scaleTargets, 1);
 }
 
-/*
+/* 
  * =====================
  * MaxPoolLayer
  * =====================
@@ -1731,15 +1740,15 @@ RandomScaleLayer::RandomScaleLayer(ConvNetThread* convNetThread, PyObject* param
     _maxScale = pyDictGetFloat(paramsDict, "maxScale");
     _tgtSize = pyDictGetInt(paramsDict, "tgtSize");
     // The smallest size the image could be after rescaling
-    _minScaledSize = _imgSize / _maxScale;
-   
+    _minScaledSize = _imgSize / _maxScale; 
+    
     // The number of discrete scales we're considering
     int numScales = _imgSize - _minScaledSize + 1;
-   
+    
     // The total number of squares of size _tgtSize that we can extract
     // from all these scales
     double numCrops = numScales * (numScales + 1) * (2 * numScales + 1) / 6;
-   
+    
     // For each scale, record the fraction of the squares that it has.
     // This will be the probability of sampling this scale.
     _scaleProbs.push_back(1.0 / numCrops);
@@ -1747,10 +1756,10 @@ RandomScaleLayer::RandomScaleLayer(ConvNetThread* convNetThread, PyObject* param
         _scaleProbs.push_back(_scaleProbs[s-1] + (s + 1) * (s + 1) / numCrops);
     }
 }
-
+ 
 void RandomScaleLayer::fpropActs(int inpIdx, float scaleTargets, PASS_TYPE passType, int passIdx) {
     if (IS_TRAIN(passType)) {
-        // _maxScale is in the range [1, 2)
+        // _maxScale is in the range [1, 2) 
         float r = randf;
         int rescaledSize = _tgtSize;
         float scaleFactor = _maxScale;
@@ -1804,7 +1813,7 @@ void CropLayer::bpropActs(NVMatrix& v, int replicaIdx, int inpIdx, float scaleTa
     assert(false);
 }
 
-/*
+/* 
  * =====================
  * NailbedLayer
  * =====================
@@ -1823,7 +1832,7 @@ void NailbedLayer::bpropActs(NVMatrix& v, int replicaIdx, int inpIdx, float scal
     convBedOfNailsUndo(v, _prev[replicaIdx][0]->getActsGrad(), _channels, _imgSize, _start, _stride, scaleTargets, 1);
 }
 
-/*
+/* 
  * =====================
  * GaussianBlurLayer
  * =====================
@@ -1851,7 +1860,7 @@ void GaussianBlurLayer::copyToGPU() {
     _filter.copyFromHost(*_hFilter, true);
 }
 
- /*
+ /* 
  * =====================
  * HorizontalReflectionLayer
  * =====================
@@ -1868,7 +1877,7 @@ void HorizontalReflectionLayer::bpropActs(NVMatrix& v, int replicaIdx, int inpId
     convReflectHorizontal(v, _prev[replicaIdx][0]->getActsGrad(), _imgSize);
 }
 
-/*
+/* 
  * =====================
  * ResizeLayer
  * =====================
@@ -1887,7 +1896,7 @@ void ResizeLayer::bpropActs(NVMatrix& v, int replicaIdx, int inpIdx, float scale
     assert(false);
 }
 
-/*
+/* 
  * =====================
  * RGBToYUVLayer
  * =====================
@@ -1904,7 +1913,7 @@ void RGBToYUVLayer::bpropActs(NVMatrix& v, int replicaIdx, int inpIdx, float sca
     assert(false);
 }
 
-/*
+/* 
  * =====================
  * RGBToLABLayer
  * =====================
@@ -1922,7 +1931,7 @@ void RGBToLABLayer::bpropActs(NVMatrix& v, int replicaIdx, int inpIdx, float sca
     assert(false);
 }
 
-/*
+/* 
  * =====================
  * ResponseNormLayer
  * =====================
@@ -1967,7 +1976,7 @@ void CrossMapResponseNormLayer::bpropActs(NVMatrix& v, int replicaIdx, int inpId
     convResponseNormCrossMapUndo(v, *_inputs[0], getActs(), _prev[replicaIdx][0]->getActsGrad(), _channels, _size, _scale, _pow, _minDiv, _blocked, scaleTargets, 1);
 }
 
-/*
+/* 
  * =====================
  * ContrastNormLayer
  * =====================
@@ -1977,7 +1986,7 @@ ContrastNormLayer::ContrastNormLayer(ConvNetThread* convNetThread, PyObject* par
 
 void ContrastNormLayer::fpropActs(int inpIdx, float scaleTargets, PASS_TYPE passType, int passIdx) {
     NVMatrix& images = *_inputs[0];
-    convLocalPool(images, _meanDiffs, _channels, _size, -_size/2, 1, _imgSize, AvgPooler<false>());
+    convLocalPool(images, _meanDiffs, _channels, _size, -_size/2, 1, _imgSize, AvgPooler());
     _meanDiffs.add(images, -1, 1);
     convContrastNorm(images, _meanDiffs, _denoms, getActs(), _channels, _size, _scale, _pow, _minDiv);
 }
@@ -1991,7 +2000,7 @@ void ContrastNormLayer::truncBwdActs() {
     _meanDiffs.truncate();
 }
 
-/*
+/* 
  * =====================
  * CostLayer
  * =====================
@@ -2013,14 +2022,14 @@ void CostLayer::bprop(NVMatrix& v, PASS_TYPE passType, int passIdx) {
     }
 }
 
-bool CostLayer::fprop(PASS_TYPE passType, int passIdx) {
-    if (Layer::fprop(passType, passIdx)) {
-        syncStream();
-        getConvNet().getMessageQueue().enqueue(new Message(FPROP_TERMINAL));
-        return true;
-    }
-    return false;
-}
+//bool CostLayer::fprop(PASS_TYPE passType, int passIdx) {
+//    if (Layer::fprop(passType, passIdx)) {
+//        syncStream();
+//        getConvNet().getMessageQueue().enqueue(new Message(FPROP_TERMINAL));
+//        return true;
+//    }
+//    return false;
+//}
 
 void CostLayer::fpropCommon(PASS_TYPE passType) {
     _numCases = Layer::getNumCases(*_inputs[0]);
@@ -2055,11 +2064,13 @@ CostLayer& CostLayer::make(ConvNetThread* convNetThread, PyObject* paramsDict, s
         return *new LogregCostLayer(convNetThread, paramsDict, replicaID);
     } else if (type == "cost.sum2") {
         return *new SumOfSquaresCostLayer(convNetThread, paramsDict, replicaID);
+    } else if (type == "cost.locrank") {
+        return *new LocRankCostLayer(convNetThread, paramsDict, replicaID);
     }
     throw std::string("Unknown cost layer type ") + type;
 }
 
-/*
+/* 
  * =====================
  * CrossEntCostLayer
  * =====================
@@ -2073,10 +2084,11 @@ void CrossEntCostLayer::fpropActs(int inpIdx, float scaleTargets, PASS_TYPE pass
         NVMatrix& labels = *_inputs[0];
         NVMatrix& probs = *_inputs[1];
         int numCases = labels.getLeadingDim();
-        computeCrossEntCost(labels, probs, _trueLabelLogProbs, _correctProbs);
+        NVMatrix& trueLabelLogProbs = getActs(), correctProbs;
+        computeCrossEntCost(labels, probs, trueLabelLogProbs, correctProbs);
         _costv.clear();
-        _costv.push_back(-_trueLabelLogProbs.sum());
-        _costv.push_back(numCases - _correctProbs.sum());
+        _costv.push_back(-trueLabelLogProbs.sum());
+        _costv.push_back(numCases - correctProbs.sum());
     }
 }
 
@@ -2094,7 +2106,7 @@ void CrossEntCostLayer::bpropActs(NVMatrix& v, int replicaIdx, int inpIdx, float
     }
 }
 
-/*
+/* 
  * =====================
  * BinomialCrossEntropyCostLayer
  * =====================
@@ -2167,7 +2179,7 @@ void BinomialCrossEntropyCostLayer::bpropActs(NVMatrix& v, int replicaIdx, int i
 float BinomialCrossEntropyCostLayer::getPosWeight() {
     return _posWeight;
 }
-/*
+/* 
  * =====================
  * DetectionCrossEntropyCostLayer
  * =====================
@@ -2286,7 +2298,7 @@ void LogregCostLayer::bpropActs(NVMatrix& v, int replicaIdx, int inpIdx, float s
     }
 }
 
-/*
+/* 
  * =====================
  * SumOfSquaresCostLayer
  * =====================
@@ -2304,3 +2316,42 @@ void SumOfSquaresCostLayer::bpropActs(NVMatrix& v, int replicaIdx, int inpIdx, f
     _prev[replicaIdx][inpIdx]->getActsGrad().add(*_inputs[0], scaleTargets, -2 * _coeff);
 }
 
+/*
+ * =====================
+ * LocRankCostlayer
+ * =====================
+ */
+LocRankCostLayer::LocRankCostLayer(ConvNetThread* convNetThread, PyObject* paramsDict, int replicaID) : CostLayer(convNetThread, paramsDict, replicaID, true) {
+}
+
+void LocRankCostLayer::fpropActs(int inpIdx, float scaleTargets, PASS_TYPE passType, int passIdx) {
+	// This layer uses its three inputs together
+	if (inpIdx == 0) {
+		NVMatrix& x1 = *_inputs[0];
+		NVMatrix& x2 = *_inputs[1];
+		NVMatrix& x3 = *_inputs[2];
+		NVMatrix& x4 = *_inputs[3];
+		//NVMatrix& rankCost = getActs();
+		computeLocRankCost(x1, x2, x3, x4, _rankCosts);
+		_costv.clear();
+		_costv.push_back(_rankCosts.sum());
+	}
+}
+
+void LocRankCostLayer::bpropActs(NVMatrix& v, int replicaIdx, int inpIdx, float scaleTargets, PASS_TYPE passType) {
+    if (inpIdx == 0) {
+    	//NVMatrix& x1 = _prev[replicaIdx][0]->getActs();
+    	NVMatrix& x1 = *_inputs[0];
+    	//NVMatrix& x2 = _prev[replicaIdx][1]->getActs();
+    	NVMatrix& x2 = *_inputs[1];
+    	//NVMatrix& x3 = _prev[replicaIdx][2]->getActs();
+    	NVMatrix& x3 = *_inputs[2];
+    	//NVMatrix& x4 = _prev[replicaIdx][3]->getActs();
+    	NVMatrix& x4 = *_inputs[3];
+    	NVMatrix& target1 = _prev[replicaIdx][0]->getActsGrad();
+    	NVMatrix& target2 = _prev[replicaIdx][1]->getActsGrad();
+    	NVMatrix& target3 = _prev[replicaIdx][2]->getActsGrad();
+
+    	computeLocRankGrad(_rankCosts, x1, x2, x3, x4, target1, target2, target3, _coeff);
+    }
+}
