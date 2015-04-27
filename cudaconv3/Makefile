@@ -88,7 +88,7 @@ OBJS +=  $(patsubst %.c,$(OBJDIR)/%.c.o,$(CFILES))
 OBJS +=  $(patsubst %.cu,$(OBJDIR)/%.cu.o,$(CUFILES))
 
 # Target rules
-all: makedirs $(TARGET)
+all: makedirs $(TARGET) lntarget
 
 $(OBJDIR)/%.cu.o : %.cu $(CU_DEPS)
 	$(NVCC) $(NVCCFLAGS) $(GENCODE_FLAGS) $(INCLUDES) -o $@ -c $<
@@ -98,6 +98,8 @@ $(OBJDIR)/%.cpp.o : %.cpp $(C_DEPS)
 
 $(TARGET): $(OBJS)
 	$(GCC) $(CCFLAGS) -o $@ $+ $(LDFLAGS) 
+	
+lntarget:
 	ln -sf $(TARGET) .
 
 makedirs:
