@@ -48,5 +48,4 @@ cd nvmatrix && make -j $* && cd ..
 cd cudaconv3 && make -j $* && cd ..
 cd cudaconvnet && make -j $* && cd ..
 cd make-data/pyext && make -j $* && cd ../..
-cd python_util/imgresize && make -j $* && cd ../..
 
