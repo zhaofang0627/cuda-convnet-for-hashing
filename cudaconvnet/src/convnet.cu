@@ -60,8 +60,13 @@ ConvNet::ConvNet(PyObject* layerParams, intv& deviceIDs,
         for (int r = 0; r < it->second.size(); r++) {
             _numFwdTerminal += it->second[r]->getNext().size() == 0;
             if (it->second[r]->getNext().size() == 0) {
+            	it->second[r]->setTerminal();
                 printf("Fwd terminal: %s\n", it->second[r]->getName().c_str());
             }
+        }
+    }
+    for (NameReplicaLayerMap::iterator it = _layerMap.begin(); it != _layerMap.end(); ++it) {
+        for (int r = 0; r < it->second.size(); r++) {
             it->second[r]->postInit();
         }
     }
