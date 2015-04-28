@@ -129,12 +129,13 @@ class ConvNet(IGPUModel):
         
         IGPUModel.__init__(self, "ConvNet", op, load_dic, filename_options, dp_params=dp_params)
         
-        # load data for sampling
-        self.data_list = unpickle(os.path.join(self.data_path, 'datalist'))
-        self.label_mat = unpickle(os.path.join(self.data_path, 'labmat')).astype(n.single)
-        print self.label_mat.shape
-        # balance
-        self.cls_weight = 3000/self.label_mat[:self.train_data_provider.train_size].sum(axis=0).astype(int)+1
+        if not self.test_only:
+            # load data for sampling
+            self.data_list = unpickle(os.path.join(self.data_path, 'datalist'))
+            self.label_mat = unpickle(os.path.join(self.data_path, 'labmat')).astype(n.single)
+            print self.label_mat.shape
+            # balance
+            self.cls_weight = 3000/self.label_mat[:self.train_data_provider.train_size].sum(axis=0).astype(int)+1
         
     def import_model(self):
         lib_name = "cudaconvnet._ConvNet"
